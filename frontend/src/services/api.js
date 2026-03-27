@@ -30,3 +30,4 @@ export async function fetchLogFile(storeNumber, filename) {
   );
   return data;
 }
+

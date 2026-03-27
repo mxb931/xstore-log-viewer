@@ -1,7 +1,7 @@
 export default function LogFileList({ files, selectedFile, onSelect, loading, error }) {
   if (loading) {
     return (
-      <div className="flex-1 flex items-center justify-center p-4 text-gray-400 text-xs animate-pulse">
+      <div className="flex-1 flex items-center justify-center p-4 text-gray-500 dark:text-gray-400 text-xs animate-pulse">
         Loading directory…
       </div>
     );
@@ -18,7 +18,7 @@ export default function LogFileList({ files, selectedFile, onSelect, loading, er
 
   if (!files) {
     return (
-      <div className="flex-1 p-4 text-gray-500 text-xs text-center mt-8">
+      <div className="flex-1 p-4 text-gray-400 dark:text-gray-500 text-xs text-center mt-8">
         Enter a store number above and click Connect to browse log files.
       </div>
     );
@@ -26,7 +26,7 @@ export default function LogFileList({ files, selectedFile, onSelect, loading, er
 
   if (files.length === 0) {
     return (
-      <div className="flex-1 p-4 text-gray-400 text-xs text-center mt-8">
+      <div className="flex-1 p-4 text-gray-500 dark:text-gray-400 text-xs text-center mt-8">
         No log files found in /shw-logs/ for this store.
       </div>
     );
@@ -41,10 +41,11 @@ export default function LogFileList({ files, selectedFile, onSelect, loading, er
             <li key={file.name}>
               <button
                 onClick={() => onSelect(file)}
-                className={`w-full text-left px-4 py-2 border-b border-gray-800 hover:bg-gray-800 transition-colors
-                  ${isSelected ? 'bg-blue-900/40 border-l-2 border-l-blue-500' : 'border-l-2 border-l-transparent'}`}
+                className={`w-full text-left px-4 py-2 border-b border-gray-100 hover:bg-gray-100 transition-colors
+                  dark:border-gray-800 dark:hover:bg-gray-800
+                  ${isSelected ? 'bg-blue-50 border-l-2 border-l-blue-500 dark:bg-blue-900/40' : 'border-l-2 border-l-transparent'}`}
               >
-                <p className="truncate text-xs font-mono text-gray-200">{file.name}</p>
+                <p className="truncate text-xs font-mono text-gray-800 dark:text-gray-200">{file.name}</p>
                 <div className="flex gap-3 mt-0.5 text-gray-500" style={{ fontSize: '10px' }}>
                   {file.lastModified && <span>{file.lastModified}</span>}
                   {file.size && <span>{file.size}</span>}

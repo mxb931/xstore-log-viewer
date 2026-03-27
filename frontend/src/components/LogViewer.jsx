@@ -26,11 +26,11 @@ function parseLineDate(line) {
 
 // Color classes by log level for the line highlight
 const LEVEL_COLORS = {
-  ERROR: 'text-red-400',
-  WARN: 'text-yellow-300',
-  INFO: 'text-blue-300',
-  DEBUG: 'text-green-400',
-  TRACE: 'text-gray-400',
+  ERROR: 'text-red-600 dark:text-red-400',
+  WARN: 'text-yellow-600 dark:text-yellow-300',
+  INFO: 'text-blue-600 dark:text-blue-300',
+  DEBUG: 'text-green-600 dark:text-green-400',
+  TRACE: 'text-gray-500 dark:text-gray-400',
 };
 
 function HighlightedLine({ text, pattern }) {
@@ -58,19 +58,78 @@ function HighlightedLine({ text, pattern }) {
 }
 
 export default function LogViewer({ storeNumber, file, filters }) {
+  // ── State ─────────────────────────────────────────────────────────────────
   const [allLines, setAllLines] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const containerRef = useRef(null);
+  const [reversed, setReversed] = useState(true);
   const [listHeight, setListHeight] = useState(500);
+
+  const containerRef = useRef(null);
+
+  // ── Memos (declared before effects that depend on them) ───────────────────
+  const matchFn = useMemo(() => {
+    const { text, isRegex } = filters;
+    if (!text) return null;
+    if (isRegex) {
+      try {
+        const re = new RegExp(text, 'i');
+        return (line) => re.test(line);
+      } catch {
+        return null;
+      }
+    }
+    const lower = text.toLowerCase();
+    return (line) => line.toLowerCase().includes(lower);
+  }, [filters.text, filters.isRegex]);
+
+  const dateFrom = useMemo(
+    () => (filters.dateFrom ? new Date(filters.dateFrom) : null),
+    [filters.dateFrom]
+  );
+  const dateTo = useMemo(
+    () => (filters.dateTo ? new Date(filters.dateTo) : null),
+    [filters.dateTo]
+  );
+
+  const filteredLines = useMemo(() => {
+    if (!allLines.length) return [];
+    return allLines.reduce((acc, line, idx) => {
+      if (matchFn && !matchFn(line)) return acc;
+      if (filters.levels.size > 0) {
+        const level = detectLevel(line);
+        if (!level || !filters.levels.has(level)) return acc;
+      }
+      if (dateFrom || dateTo) {
+        const lineDate = parseLineDate(line);
+        if (!lineDate) return acc;
+        if (dateFrom && lineDate < dateFrom) return acc;
+        if (dateTo && lineDate > dateTo) return acc;
+      }
+      acc.push({ line, index: idx });
+      return acc;
+    }, []);
+  }, [allLines, matchFn, filters.levels, dateFrom, dateTo]);
+
+  const highlightPattern = useMemo(() => {
+    if (!filters.text) return null;
+    if (filters.isRegex) return filters.text;
+    return filters.text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }, [filters.text, filters.isRegex]);
+
+  // Reversed view — newest lines at top
+  const displayLines = useMemo(
+    () => (reversed ? [...filteredLines].reverse() : filteredLines),
+    [filteredLines, reversed]
+  );
+
+  // ── Effects ───────────────────────────────────────────────────────────────
 
   // Resize observer to fill available vertical space
   useEffect(() => {
     if (!containerRef.current) return;
     const observer = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        setListHeight(entry.contentRect.height);
-      }
+      for (const entry of entries) setListHeight(entry.contentRect.height);
     });
     observer.observe(containerRef.current);
     return () => observer.disconnect();
@@ -79,15 +138,11 @@ export default function LogViewer({ storeNumber, file, filters }) {
   // Load file whenever storeNumber or file changes
   useEffect(() => {
     if (!storeNumber || !file) return;
-
     setLoading(true);
     setError('');
     setAllLines([]);
-
     fetchLogFile(storeNumber, file.name)
-      .then((text) => {
-        setAllLines(text.split('\n'));
-      })
+      .then((text) => setAllLines(text.split('\n')))
       .catch((err) => {
         const msg =
           err.response?.data?.error ||
@@ -99,95 +154,34 @@ export default function LogViewer({ storeNumber, file, filters }) {
       .finally(() => setLoading(false));
   }, [storeNumber, file]);
 
-  // Compute regex or plain-text match function from filters
-  const matchFn = useMemo(() => {
-    const { text, isRegex } = filters;
-    if (!text) return null;
-    if (isRegex) {
-      try {
-        const re = new RegExp(text, 'i');
-        return (line) => re.test(line);
-      } catch {
-        return null; // invalid regex — don't filter
-      }
-    }
-    const lower = text.toLowerCase();
-    return (line) => line.toLowerCase().includes(lower);
-  }, [filters.text, filters.isRegex]);
+  // ── Callbacks ─────────────────────────────────────────────────────────────
 
-  // Parsed date range limits
-  const dateFrom = useMemo(
-    () => (filters.dateFrom ? new Date(filters.dateFrom) : null),
-    [filters.dateFrom]
-  );
-  const dateTo = useMemo(
-    () => (filters.dateTo ? new Date(filters.dateTo) : null),
-    [filters.dateTo]
-  );
-
-  // Filtered lines (with original 0-based index for line numbers)
-  const filteredLines = useMemo(() => {
-    if (!allLines.length) return [];
-
-    return allLines.reduce((acc, line, idx) => {
-      // Text / regex filter
-      if (matchFn && !matchFn(line)) return acc;
-
-      // Level filter
-      if (filters.levels.size > 0) {
-        const level = detectLevel(line);
-        if (!level || !filters.levels.has(level)) return acc;
-      }
-
-      // Date range filter
-      if (dateFrom || dateTo) {
-        const lineDate = parseLineDate(line);
-        if (!lineDate) return acc; // exclude lines without a parseable date
-        if (dateFrom && lineDate < dateFrom) return acc;
-        if (dateTo && lineDate > dateTo) return acc;
-      }
-
-      acc.push({ line, index: idx });
-      return acc;
-    }, []);
-  }, [allLines, matchFn, filters.levels, dateFrom, dateTo]);
-
-  // Highlight pattern for text matches
-  const highlightPattern = useMemo(() => {
-    if (!filters.text) return null;
-    if (filters.isRegex) return filters.text;
-    // Escape for use as a literal pattern inside a regex
-    return filters.text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  }, [filters.text, filters.isRegex]);
-
-  const isFiltered =
-    filters.text || filters.levels.size > 0 || filters.dateFrom || filters.dateTo;
+  const toggleReversed = useCallback(() => setReversed((prev) => !prev), []);
 
   const renderRow = useCallback(
     ({ index, style }) => {
-      const { line, index: lineNumber } = filteredLines[index];
+      const { line, index: lineNumber } = displayLines[index];
       const level = detectLevel(line);
-      const levelColor = level ? LEVEL_COLORS[level] : 'text-gray-300';
-
+      const levelColor = level ? LEVEL_COLORS[level] : 'text-gray-700 dark:text-gray-300';
       return (
-        <div
-          style={style}
-          className={`flex min-w-0 hover:bg-white/5 px-3 ${levelColor}`}
-        >
+        <div style={style} className={`flex min-w-0 hover:bg-black/5 dark:hover:bg-white/5 px-3 ${levelColor}`}>
           <span
             className="select-none text-gray-600 mr-4 text-right shrink-0"
             style={{ width: '5ch' }}
           >
             {lineNumber + 1}
           </span>
-          <span className="font-mono text-xs whitespace-pre leading-5 ">
+          <span className="font-mono text-xs whitespace-pre leading-5">
             <HighlightedLine text={line} pattern={highlightPattern} />
           </span>
         </div>
       );
     },
-    [filteredLines, highlightPattern]
+    [displayLines, highlightPattern]
   );
+
+  const isFiltered =
+    filters.text || filters.levels.size > 0 || filters.dateFrom || filters.dateTo;
 
   if (!file) {
     return (
@@ -200,9 +194,9 @@ export default function LogViewer({ storeNumber, file, filters }) {
   return (
     <div className="flex-1 flex flex-col min-h-0">
       {/* Toolbar */}
-      <div className="flex items-center justify-between px-4 py-2 bg-gray-900 border-b border-gray-700 shrink-0">
+      <div className="flex items-center justify-between px-4 py-2 bg-gray-50 border-b border-gray-200 dark:bg-gray-900 dark:border-gray-700 shrink-0">
         <div className="flex items-center gap-3 min-w-0">
-          <span className="font-mono text-xs text-gray-300 truncate">{file.name}</span>
+          <span className="font-mono text-xs text-gray-700 dark:text-gray-300 truncate">{file.name}</span>
           {!loading && (
             <span className="text-xs text-gray-500">
               {isFiltered
@@ -210,18 +204,35 @@ export default function LogViewer({ storeNumber, file, filters }) {
                 : `${allLines.length.toLocaleString()} lines`}
             </span>
           )}
+
+          {/* Reverse order toggle */}
+          <button
+            onClick={toggleReversed}
+            title={reversed ? 'Show oldest first' : 'Show newest first'}
+            className={`flex items-center gap-1 px-2.5 py-1 rounded text-xs border transition-all ${
+              reversed
+                ? 'bg-gray-200 border-gray-500 text-gray-700 dark:bg-gray-700 dark:border-gray-400 dark:text-gray-200'
+                : 'bg-white border-gray-300 text-gray-500 hover:border-gray-500 hover:text-gray-700 dark:bg-gray-800 dark:border-gray-600 dark:text-gray-400 dark:hover:border-gray-400 dark:hover:text-gray-200'
+            }`}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3" viewBox="0 0 20 20" fill="currentColor">
+              <path d="M3 3a1 1 0 000 2h11a1 1 0 100-2H3zM3 7a1 1 0 000 2h7a1 1 0 100-2H3zM3 11a1 1 0 100 2h4a1 1 0 100-2H3zM15 8a1 1 0 10-2 0v5.586l-1.293-1.293a1 1 0 00-1.414 1.414l3 3a1 1 0 001.414 0l3-3a1 1 0 00-1.414-1.414L15 13.586V8z" />
+            </svg>
+            {reversed ? 'Newest first' : 'Oldest first'}
+          </button>
         </div>
+
         <ExportButton
-          lines={filteredLines.map((f) => f.line)}
+          lines={displayLines.map((f) => f.line)}
           filename={`${storeNumber}_${file.name}`}
-          disabled={loading || filteredLines.length === 0}
+          disabled={loading || displayLines.length === 0}
         />
       </div>
 
       {/* Content */}
-      <div ref={containerRef} className="flex-1 min-h-0 bg-gray-950">
+      <div ref={containerRef} className="flex-1 min-h-0 bg-white dark:bg-gray-950 relative">
         {loading && (
-          <div className="flex items-center justify-center h-full text-gray-400 text-xs animate-pulse">
+          <div className="flex items-center justify-center h-full text-gray-500 dark:text-gray-400 text-xs animate-pulse">
             Loading {file.name}…
           </div>
         )}
@@ -230,15 +241,15 @@ export default function LogViewer({ storeNumber, file, filters }) {
             {error}
           </div>
         )}
-        {!loading && !error && filteredLines.length === 0 && allLines.length > 0 && (
+        {!loading && !error && displayLines.length === 0 && allLines.length > 0 && (
           <div className="flex items-center justify-center h-full text-gray-500 text-xs">
             No lines match the current filters.
           </div>
         )}
-        {!loading && !error && filteredLines.length > 0 && (
+        {!loading && !error && displayLines.length > 0 && (
           <List
             height={listHeight}
-            itemCount={filteredLines.length}
+            itemCount={displayLines.length}
             itemSize={20}
             width="100%"
           >

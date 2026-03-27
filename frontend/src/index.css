@@ -4,7 +4,7 @@
 
 @layer base {
   body {
-    @apply bg-gray-950 text-gray-100 text-sm;
+    @apply bg-white text-gray-900 text-sm dark:bg-gray-950 dark:text-gray-100;
   }
 
   ::-webkit-scrollbar {
@@ -12,9 +12,9 @@
     height: 6px;
   }
   ::-webkit-scrollbar-track {
-    @apply bg-gray-900;
+    @apply bg-gray-100 dark:bg-gray-900;
   }
   ::-webkit-scrollbar-thumb {
-    @apply bg-gray-600 rounded;
+    @apply bg-gray-300 rounded dark:bg-gray-600;
   }
 }
