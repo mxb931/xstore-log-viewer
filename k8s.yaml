@@ -1,0 +1,58 @@
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: xstore-log-viewer-deployment
+spec:
+  selector:
+    matchLabels:
+      app: xstore-log-viewer
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: xstore-log-viewer
+    spec:
+      containers:
+      - name: xstore-log-viewer
+        image: docker.artifactory.sherwin.com/tag-pos/xstore-log-viewer:3
+        ports:
+        - containerPort: 3001
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: xstore-log-viewer-service
+spec:
+  selector:
+    app: xstore-log-viewer
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 3001
+  type: ClusterIP
+
+---
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: xstore-log-viewer-ingress
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: xstore-log-viewer.np-k8s.sherwin.com
+      http:
+        paths:
+          - backend:
+              service:
+                name: xstore-log-viewer-service
+                port:
+                  number: 80
+            path: /
+            pathType: ImplementationSpecific
+  tls:
+    - hosts:
+        - xstore-log-viewer.np-k8s.sherwin.com
