@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 
-export default function StoreSelector({ onConnect, disabled }) {
+export default function StoreSelector({ onConnect, onImportFile, disabled }) {
   const [value, setValue] = useState('');
   const [error, setError] = useState('');
+  const fileInputRef = useRef(null);
 
   function handleSubmit(e) {
     e.preventDefault();
@@ -41,6 +42,29 @@ export default function StoreSelector({ onConnect, disabled }) {
                      disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
         >
           Connect
+        </button>
+      </div>
+      <div className="mt-2">
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".log,.txt,.out,.csv,.json,text/plain"
+          className="hidden"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file && onImportFile) {
+              onImportFile(file);
+            }
+            e.target.value = '';
+          }}
+        />
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => fileInputRef.current?.click()}
+          className="w-full px-4 py-2 rounded border border-gray-300 bg-white text-gray-700 hover:bg-gray-100 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700 text-xs font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          Import Local File
         </button>
       </div>
       {error && <p className="mt-1 text-xs text-red-400">{error}</p>}

@@ -1,31 +1,62 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import StoreSelector from './components/StoreSelector';
 import LogFileList from './components/LogFileList';
 import FilterPanel from './components/FilterPanel';
 import LogViewer from './components/LogViewer';
 import { fetchDirectory, downloadLogsZip } from './services/api';
 
-const DEFAULT_FILTERS = {
-  text: '',
-  isRegex: false,
-  levels: new Set(),
-  dateFrom: '',
-  dateTo: '',
-};
+function createDefaultFilters() {
+  return {
+    text: '',
+    isRegex: false,
+    levels: new Set(),
+    dateFrom: '',
+    dateTo: '',
+  };
+}
+
+function formatFileSize(bytes) {
+  if (!bytes || bytes < 1024) return `${bytes || 0} B`;
+  const units = ['KB', 'MB', 'GB'];
+  let value = bytes / 1024;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value.toFixed(value >= 100 ? 0 : 1)} ${units[unitIndex]}`;
+}
 
 export default function App() {
   const [storeNumber, setStoreNumber] = useState('');
   const [files, setFiles] = useState(null);
   const [dirLoading, setDirLoading] = useState(false);
   const [dirError, setDirError] = useState('');
-  const [selectedFile, setSelectedFile] = useState(null);
+
+  const [openTabs, setOpenTabs] = useState([]);
+  const [activeTabId, setActiveTabId] = useState(null);
+  const [tabFiltersById, setTabFiltersById] = useState({});
+  const [localContentByTabId, setLocalContentByTabId] = useState({});
+
   const [selectedFilenames, setSelectedFilenames] = useState(new Set());
   const [downloadLoading, setDownloadLoading] = useState(false);
   const [downloadError, setDownloadError] = useState('');
   const [downloadSuccess, setDownloadSuccess] = useState('');
   const [downloadProgress, setDownloadProgress] = useState({ loaded: 0, total: 0, percent: null });
-  const [filters, setFilters] = useState(DEFAULT_FILTERS);
+
   const [dark, setDark] = useState(() => localStorage.getItem('theme') !== 'light');
+  const tabStripRef = useRef(null);
+  const activeTabRef = useRef(null);
+
+  const activeTab = openTabs.find((tab) => tab.id === activeTabId) || null;
+  const activeFilters = activeTabId
+    ? (tabFiltersById[activeTabId] || createDefaultFilters())
+    : createDefaultFilters();
+  const activeLocalContent =
+    activeTab && activeTab.source === 'local'
+      ? (localContentByTabId[activeTab.id] || '')
+      : '';
+  const activeRemoteFile = activeTab && activeTab.source === 'remote' ? activeTab.file : null;
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', dark);
@@ -38,16 +69,26 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [downloadSuccess]);
 
+  useEffect(() => {
+    if (!activeTabRef.current || !tabStripRef.current) return;
+    activeTabRef.current.scrollIntoView({ behavior: 'smooth', inline: 'nearest', block: 'nearest' });
+  }, [activeTabId]);
+
   const handleConnect = useCallback(async (number) => {
     setStoreNumber(number);
     setDirLoading(true);
     setDirError('');
     setDownloadError('');
     setDownloadProgress({ loaded: 0, total: 0, percent: null });
+
     setFiles(null);
-    setSelectedFile(null);
     setSelectedFilenames(new Set());
-    setFilters(DEFAULT_FILTERS);
+
+    // Store reconnect closes every open tab by design.
+    setOpenTabs([]);
+    setActiveTabId(null);
+    setTabFiltersById({});
+    setLocalContentByTabId({});
 
     try {
       const { files: fetchedFiles } = await fetchDirectory(number);
@@ -64,10 +105,129 @@ export default function App() {
     }
   }, []);
 
-  const handleFileSelect = useCallback((file) => {
-    setSelectedFile(file);
-    setFilters(DEFAULT_FILTERS);
+  const openRemoteTab = useCallback((file) => {
+    if (!storeNumber) return;
+
+    const tabId = `remote:${storeNumber}:${file.name}`;
+
+    setOpenTabs((prev) => {
+      if (prev.some((tab) => tab.id === tabId)) return prev;
+      return [
+        ...prev,
+        {
+          id: tabId,
+          source: 'remote',
+          storeNumber,
+          file,
+          title: file.name,
+        },
+      ];
+    });
+
+    setActiveTabId(tabId);
+    setTabFiltersById((prev) => {
+      if (prev[tabId]) return prev;
+      return { ...prev, [tabId]: createDefaultFilters() };
+    });
+  }, [storeNumber]);
+
+  const handleImportFile = useCallback(async (file) => {
+    if (!file) return;
+
+    const tabId = `local:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+
+    try {
+      const text = await file.text();
+      const importedFile = {
+        name: file.name,
+        size: formatFileSize(file.size),
+        lastModified: file.lastModified ? new Date(file.lastModified).toLocaleString() : '',
+      };
+
+      setLocalContentByTabId((prev) => ({ ...prev, [tabId]: text }));
+      setOpenTabs((prev) => [
+        ...prev,
+        {
+          id: tabId,
+          source: 'local',
+          file: importedFile,
+          title: importedFile.name,
+        },
+      ]);
+      setActiveTabId(tabId);
+      setTabFiltersById((prev) => ({ ...prev, [tabId]: createDefaultFilters() }));
+    } catch (err) {
+      setDownloadError(err.message || 'Failed to import local file.');
+    }
   }, []);
+
+  const handleCloseTab = useCallback((tabId) => {
+    setOpenTabs((prev) => {
+      const index = prev.findIndex((tab) => tab.id === tabId);
+      if (index === -1) return prev;
+
+      const nextTabs = prev.filter((tab) => tab.id !== tabId);
+      setActiveTabId((currentActive) => {
+        if (currentActive !== tabId) return currentActive;
+        if (nextTabs.length === 0) return null;
+        const nextIndex = Math.min(index, nextTabs.length - 1);
+        return nextTabs[nextIndex].id;
+      });
+
+      return nextTabs;
+    });
+
+    setTabFiltersById((prev) => {
+      if (!prev[tabId]) return prev;
+      const next = { ...prev };
+      delete next[tabId];
+      return next;
+    });
+
+    setLocalContentByTabId((prev) => {
+      if (!prev[tabId]) return prev;
+      const next = { ...prev };
+      delete next[tabId];
+      return next;
+    });
+  }, []);
+
+  const closeActiveTab = useCallback(() => {
+    if (!activeTabId) return;
+    handleCloseTab(activeTabId);
+  }, [activeTabId, handleCloseTab]);
+
+  const activateAdjacentTab = useCallback((direction) => {
+    if (!openTabs.length || !activeTabId) return;
+    const currentIndex = openTabs.findIndex((tab) => tab.id === activeTabId);
+    if (currentIndex === -1) return;
+    const nextIndex = (currentIndex + direction + openTabs.length) % openTabs.length;
+    setActiveTabId(openTabs[nextIndex].id);
+  }, [openTabs, activeTabId]);
+
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      const key = event.key.toLowerCase();
+      const mod = event.metaKey || event.ctrlKey;
+      if (!mod) return;
+
+      if (key === 'w' && activeTabId) {
+        event.preventDefault();
+        event.stopPropagation();
+        closeActiveTab();
+        return;
+      }
+
+      if (event.key === 'Tab' && openTabs.length > 1 && activeTabId) {
+        event.preventDefault();
+        event.stopPropagation();
+        activateAdjacentTab(event.shiftKey ? -1 : 1);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [activeTabId, openTabs.length, closeActiveTab, activateAdjacentTab]);
 
   const handleToggleFileSelection = useCallback((filename) => {
     setSelectedFilenames((prev) => {
@@ -109,12 +269,16 @@ export default function App() {
     }
   }, [storeNumber, selectedFilenames, downloadLoading]);
 
+  const handleActiveFiltersChange = useCallback((nextFilters) => {
+    if (!activeTabId) return;
+    setTabFiltersById((prev) => ({ ...prev, [activeTabId]: nextFilters }));
+  }, [activeTabId]);
+
   return (
     <div className="flex flex-col h-screen overflow-hidden">
       {/* Header */}
       <header className="bg-gray-50 border-b border-gray-200 dark:bg-gray-900 dark:border-gray-700 px-5 py-3 flex items-center gap-4 shrink-0">
         <div className="flex items-center gap-2">
-          {/* Sherwin-Williams inspired logo mark */}
           <div className="w-7 h-7 rounded-full bg-red-600 flex items-center justify-center text-white font-black text-xs leading-none select-none">
             SW
           </div>
@@ -153,12 +317,16 @@ export default function App() {
       <div className="flex flex-1 min-h-0">
         {/* Sidebar */}
         <aside className="w-72 shrink-0 flex flex-col border-r border-gray-200 bg-gray-50 dark:border-gray-700 dark:bg-gray-900">
-          <StoreSelector onConnect={handleConnect} disabled={dirLoading} />
+          <StoreSelector
+            onConnect={handleConnect}
+            onImportFile={handleImportFile}
+            disabled={dirLoading}
+          />
           <LogFileList
             files={files}
-            selectedFile={selectedFile}
+            selectedFile={activeRemoteFile}
             selectedFilenames={selectedFilenames}
-            onSelect={handleFileSelect}
+            onSelect={openRemoteTab}
             onToggleSelection={handleToggleFileSelection}
             onSelectAll={handleSelectAllFiles}
             onClearAll={handleClearAllFiles}
@@ -173,13 +341,75 @@ export default function App() {
 
         {/* Main content */}
         <main className="flex-1 flex flex-col min-w-0">
-          {selectedFile ? (
+          {openTabs.length > 0 && (
+            <div className="border-b border-gray-200 bg-gray-100 dark:border-gray-700 dark:bg-gray-900">
+              <div
+                ref={tabStripRef}
+                className="flex items-center gap-1 px-2 py-1 overflow-x-auto"
+                onWheel={(e) => {
+                  if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+                  e.preventDefault();
+                  e.currentTarget.scrollLeft += e.deltaY;
+                }}
+              >
+                {openTabs.map((tab) => {
+                  const active = tab.id === activeTabId;
+                  return (
+                    <div
+                      key={tab.id}
+                      ref={active ? activeTabRef : null}
+                      className={`group flex items-center min-w-0 max-w-xs rounded border text-xs transition-colors ${
+                        tab.source === 'local'
+                          ? active
+                            ? 'bg-amber-50 border-amber-500 text-amber-900 shadow-sm dark:bg-amber-900/25 dark:border-amber-400 dark:text-amber-100'
+                            : 'bg-amber-50/60 border-amber-200 text-amber-700 dark:bg-amber-900/10 dark:border-amber-800 dark:text-amber-300 hover:border-amber-300 dark:hover:border-amber-700'
+                          : active
+                            ? 'bg-sky-50 border-sky-500 text-sky-900 shadow-sm dark:bg-sky-900/25 dark:border-sky-400 dark:text-sky-100'
+                            : 'bg-sky-50/60 border-sky-200 text-sky-700 dark:bg-sky-900/10 dark:border-sky-800 dark:text-sky-300 hover:border-sky-300 dark:hover:border-sky-700'
+                      }`}
+                      onMouseDown={(e) => {
+                        if (e.button !== 1) return;
+                        e.preventDefault();
+                        handleCloseTab(tab.id);
+                      }}
+                    >
+                      <button
+                        onClick={() => setActiveTabId(tab.id)}
+                        className="flex items-center px-2 py-1 truncate text-left"
+                        title={tab.title}
+                      >
+                        <span className={`truncate ${active ? 'font-semibold' : ''}`}>{tab.title}</span>
+                      </button>
+                      <button
+                        onClick={() => handleCloseTab(tab.id)}
+                        className={`px-1.5 py-1 transition-colors ${
+                          active
+                            ? 'text-gray-500 hover:text-red-500 dark:text-gray-300 dark:hover:text-red-400'
+                            : 'text-gray-400 hover:text-red-500 dark:text-gray-500 dark:hover:text-red-400'
+                        }`}
+                        title="Close tab"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="px-3 pb-1 text-[10px] text-gray-500 dark:text-gray-400 select-none">
+                Shortcuts: Ctrl/Cmd+Tab next tab, Ctrl/Cmd+Shift+Tab previous tab, Ctrl/Cmd+W close tab
+              </div>
+            </div>
+          )}
+
+          {activeTab ? (
             <>
-              <FilterPanel filters={filters} onChange={setFilters} />
+              <FilterPanel filters={activeFilters} onChange={handleActiveFiltersChange} />
               <LogViewer
-                storeNumber={storeNumber}
-                file={selectedFile}
-                filters={filters}
+                storeNumber={activeTab.source === 'remote' ? activeTab.storeNumber : ''}
+                file={activeTab.file}
+                fileSource={activeTab.source}
+                localContent={activeLocalContent}
+                filters={activeFilters}
               />
             </>
           ) : (
@@ -198,10 +428,8 @@ export default function App() {
                   d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
                 />
               </svg>
-              <p className="text-sm">
-                {files
-                  ? 'Select a log file from the sidebar'
-                  : 'Enter a store number to get started'}
+              <p className="text-sm text-center px-4">
+                Connect to a store and open a file, or import a local log file.
               </p>
             </div>
           )}

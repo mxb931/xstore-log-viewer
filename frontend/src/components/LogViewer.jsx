@@ -57,7 +57,7 @@ function HighlightedLine({ text, pattern }) {
   }
 }
 
-export default function LogViewer({ storeNumber, file, filters }) {
+export default function LogViewer({ storeNumber, file, fileSource = 'remote', localContent = '', filters }) {
   // ── State ─────────────────────────────────────────────────────────────────
   const [allLines, setAllLines] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -137,7 +137,17 @@ export default function LogViewer({ storeNumber, file, filters }) {
 
   // Load file whenever storeNumber or file changes
   useEffect(() => {
-    if (!storeNumber || !file) return;
+    if (!file) return;
+
+    if (fileSource === 'local') {
+      setLoading(false);
+      setError('');
+      setAllLines(localContent ? localContent.split('\n') : []);
+      return;
+    }
+
+    if (!storeNumber) return;
+
     setLoading(true);
     setError('');
     setAllLines([]);
@@ -152,7 +162,7 @@ export default function LogViewer({ storeNumber, file, filters }) {
         setError(String(msg));
       })
       .finally(() => setLoading(false));
-  }, [storeNumber, file]);
+  }, [storeNumber, file, fileSource, localContent]);
 
   // ── Callbacks ─────────────────────────────────────────────────────────────
 
@@ -224,7 +234,7 @@ export default function LogViewer({ storeNumber, file, filters }) {
 
         <ExportButton
           lines={displayLines.map((f) => f.line)}
-          filename={`${storeNumber}_${file.name}`}
+          filename={fileSource === 'local' ? `imported_${file.name}` : `${storeNumber}_${file.name}`}
           disabled={loading || displayLines.length === 0}
         />
       </div>
