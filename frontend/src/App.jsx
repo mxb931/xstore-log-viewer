@@ -3,7 +3,7 @@ import StoreSelector from './components/StoreSelector';
 import LogFileList from './components/LogFileList';
 import FilterPanel from './components/FilterPanel';
 import LogViewer from './components/LogViewer';
-import { fetchDirectory } from './services/api';
+import { fetchDirectory, downloadLogsZip } from './services/api';
 
 const DEFAULT_FILTERS = {
   text: '',
@@ -19,6 +19,11 @@ export default function App() {
   const [dirLoading, setDirLoading] = useState(false);
   const [dirError, setDirError] = useState('');
   const [selectedFile, setSelectedFile] = useState(null);
+  const [selectedFilenames, setSelectedFilenames] = useState(new Set());
+  const [downloadLoading, setDownloadLoading] = useState(false);
+  const [downloadError, setDownloadError] = useState('');
+  const [downloadSuccess, setDownloadSuccess] = useState('');
+  const [downloadProgress, setDownloadProgress] = useState({ loaded: 0, total: 0, percent: null });
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const [dark, setDark] = useState(() => localStorage.getItem('theme') !== 'light');
 
@@ -27,12 +32,21 @@ export default function App() {
     localStorage.setItem('theme', dark ? 'dark' : 'light');
   }, [dark]);
 
+  useEffect(() => {
+    if (!downloadSuccess) return undefined;
+    const timer = setTimeout(() => setDownloadSuccess(''), 3000);
+    return () => clearTimeout(timer);
+  }, [downloadSuccess]);
+
   const handleConnect = useCallback(async (number) => {
     setStoreNumber(number);
     setDirLoading(true);
     setDirError('');
+    setDownloadError('');
+    setDownloadProgress({ loaded: 0, total: 0, percent: null });
     setFiles(null);
     setSelectedFile(null);
+    setSelectedFilenames(new Set());
     setFilters(DEFAULT_FILTERS);
 
     try {
@@ -54,6 +68,46 @@ export default function App() {
     setSelectedFile(file);
     setFilters(DEFAULT_FILTERS);
   }, []);
+
+  const handleToggleFileSelection = useCallback((filename) => {
+    setSelectedFilenames((prev) => {
+      const next = new Set(prev);
+      if (next.has(filename)) {
+        next.delete(filename);
+      } else {
+        next.add(filename);
+      }
+      return next;
+    });
+  }, []);
+
+  const handleSelectAllFiles = useCallback(() => {
+    if (!files || files.length === 0) return;
+    setSelectedFilenames(new Set(files.map((f) => f.name)));
+  }, [files]);
+
+  const handleClearAllFiles = useCallback(() => {
+    setSelectedFilenames(new Set());
+  }, []);
+
+  const handleDownloadSelected = useCallback(async () => {
+    if (!storeNumber || selectedFilenames.size === 0 || downloadLoading) return;
+
+    setDownloadLoading(true);
+    setDownloadError('');
+    setDownloadSuccess('');
+    setDownloadProgress({ loaded: 0, total: 0, percent: null });
+    try {
+      await downloadLogsZip(storeNumber, [...selectedFilenames], (progress) => {
+        setDownloadProgress(progress);
+      });
+      setDownloadSuccess('ZIP download started.');
+    } catch (err) {
+      setDownloadError(err.message || 'Failed to download ZIP archive.');
+    } finally {
+      setDownloadLoading(false);
+    }
+  }, [storeNumber, selectedFilenames, downloadLoading]);
 
   return (
     <div className="flex flex-col h-screen overflow-hidden">
@@ -90,14 +144,28 @@ export default function App() {
         </button>
       </header>
 
+      {downloadSuccess && (
+        <div className="absolute right-5 top-16 z-20 rounded border border-green-300 bg-green-50 px-3 py-2 text-xs text-green-800 shadow dark:border-green-700 dark:bg-green-900/30 dark:text-green-200">
+          {downloadSuccess}
+        </div>
+      )}
+
       <div className="flex flex-1 min-h-0">
         {/* Sidebar */}
-        <aside className="w-64 shrink-0 flex flex-col border-r border-gray-200 bg-gray-50 dark:border-gray-700 dark:bg-gray-900">
+        <aside className="w-72 shrink-0 flex flex-col border-r border-gray-200 bg-gray-50 dark:border-gray-700 dark:bg-gray-900">
           <StoreSelector onConnect={handleConnect} disabled={dirLoading} />
           <LogFileList
             files={files}
             selectedFile={selectedFile}
+            selectedFilenames={selectedFilenames}
             onSelect={handleFileSelect}
+            onToggleSelection={handleToggleFileSelection}
+            onSelectAll={handleSelectAllFiles}
+            onClearAll={handleClearAllFiles}
+            onDownloadSelected={handleDownloadSelected}
+            downloading={downloadLoading}
+            downloadProgress={downloadProgress}
+            downloadError={downloadError}
             loading={dirLoading}
             error={dirError}
           />
@@ -115,7 +183,7 @@ export default function App() {
               />
             </>
           ) : (
-            <div className="flex-1 flex flex-col items-center justify-center text-gray-600 gap-3 select-none">
+            <div className="flex-1 flex flex-col items-center justify-center text-gray-600 dark:text-gray-500 gap-3 select-none">
               <svg
                 xmlns="http://www.w3.org/2000/svg"
                 className="w-14 h-14 opacity-30"
