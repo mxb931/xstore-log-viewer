@@ -3,6 +3,7 @@ const axios = require('axios');
 const https = require('https');
 const cheerio = require('cheerio');
 const archiver = require('archiver');
+const { StringDecoder } = require('string_decoder');
 
 const router = express.Router();
 
@@ -38,6 +39,180 @@ function isValidFilename(filename) {
     !filename.includes('\\') &&
     !filename.includes('\u0000')
   );
+}
+
+function parseChunkMode(mode) {
+  return mode === 'head' ? 'head' : 'tail';
+}
+
+function parseChunkLineLimit(value) {
+  const parsed = Number.parseInt(String(value || ''), 10);
+  if (!Number.isFinite(parsed)) return 2000;
+  if (parsed < 100) return 100;
+  if (parsed > 20000) return 20000;
+  return parsed;
+}
+
+function splitLines(buffer) {
+  return buffer.split(/\r?\n/);
+}
+
+function parseContentRange(contentRange) {
+  if (!contentRange) return null;
+  const m = String(contentRange).match(/^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i);
+  if (!m) return null;
+  const start = Number.parseInt(m[1], 10);
+  const end = Number.parseInt(m[2], 10);
+  const total = m[3] === '*' ? null : Number.parseInt(m[3], 10);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  return { start, end, total: Number.isFinite(total) ? total : null };
+}
+
+function linesFromText(text) {
+  const normalized = String(text || '').replace(/\r\n/g, '\n');
+  const lines = normalized.split('\n');
+  if (lines.length > 0 && lines[lines.length - 1] === '') {
+    lines.pop();
+  }
+  return lines;
+}
+
+async function tryFetchTailChunkWithRange(url, lineLimit, maxBytes) {
+  const response = await axios.get(url, {
+    httpsAgent: insecureAgent,
+    timeout: 60000,
+    responseType: 'stream',
+    headers: {
+      'User-Agent': 'XstoreLogViewer/1.0',
+      Range: `bytes=-${maxBytes}`,
+    },
+    validateStatus: (status) => status === 206 || (status >= 200 && status < 300),
+  });
+
+  // Upstream ignored byte ranges; caller should use streaming fallback.
+  if (response.status !== 206) {
+    response.data.destroy();
+    return null;
+  }
+
+  const decoder = new StringDecoder('utf8');
+  let text = '';
+  await new Promise((resolve, reject) => {
+    response.data.on('data', (chunk) => {
+      text += decoder.write(chunk);
+    });
+    response.data.on('end', resolve);
+    response.data.on('error', reject);
+  });
+  text += decoder.end();
+
+  const contentRange = parseContentRange(response.headers['content-range']);
+  const partialPrefix = contentRange && contentRange.start > 0;
+
+  // A byte-range often starts in the middle of a line; discard that fragment.
+  if (partialPrefix) {
+    const firstBreak = text.search(/\r?\n/);
+    if (firstBreak !== -1) {
+      text = text.slice(firstBreak + 1);
+    }
+  }
+
+  const rawLines = linesFromText(text);
+  const truncatedByLineLimit = rawLines.length > lineLimit;
+  const lines = truncatedByLineLimit ? rawLines.slice(-lineLimit) : rawLines;
+
+  return {
+    lines,
+    truncated: Boolean(partialPrefix || truncatedByLineLimit),
+  };
+}
+
+async function fetchLogChunk(url, mode, lineLimit) {
+  const response = await axios.get(url, {
+    httpsAgent: insecureAgent,
+    timeout: 120000,
+    responseType: 'stream',
+    headers: { 'User-Agent': 'XstoreLogViewer/1.0' },
+  });
+
+  const stream = response.data;
+  const decoder = new StringDecoder('utf8');
+  let tailBuffer = '';
+  let done = false;
+  let truncated = false;
+  const lines = [];
+
+  const tryFinalize = (resolve) => {
+    if (done) return;
+    done = true;
+    resolve({ lines, truncated });
+  };
+
+  return new Promise((resolve, reject) => {
+    stream.on('data', (chunk) => {
+      if (done) return;
+
+      const text = decoder.write(chunk);
+      if (!text) return;
+
+      tailBuffer += text;
+      const parts = splitLines(tailBuffer);
+      tailBuffer = parts.pop() || '';
+
+      for (const line of parts) {
+        if (mode === 'head') {
+          if (lines.length < lineLimit) {
+            lines.push(line);
+          } else {
+            truncated = true;
+            done = true;
+            stream.destroy();
+            resolve({ lines, truncated });
+            return;
+          }
+        } else {
+          if (lines.length === lineLimit) {
+            lines.shift();
+            truncated = true;
+          }
+          lines.push(line);
+        }
+      }
+    });
+
+    stream.on('end', () => {
+      if (done) return;
+
+      const remainder = tailBuffer + decoder.end();
+      if (remainder.length > 0) {
+        if (mode === 'head') {
+          if (lines.length < lineLimit) {
+            lines.push(remainder);
+          } else {
+            truncated = true;
+          }
+        } else {
+          if (lines.length === lineLimit) {
+            lines.shift();
+            truncated = true;
+          }
+          lines.push(remainder);
+        }
+      }
+
+      tryFinalize(resolve);
+    });
+
+    stream.on('close', () => {
+      if (done) return;
+      tryFinalize(resolve);
+    });
+
+    stream.on('error', (err) => {
+      if (done) return;
+      reject(err);
+    });
+  });
 }
 
 /**
@@ -122,6 +297,67 @@ router.get('/:storeNumber', async (req, res) => {
 });
 
 /**
+ * GET /api/logs/:storeNumber/:filename/chunk?mode=head|tail&lines=2000
+ * Returns a partial log payload optimized for fast first render.
+ */
+router.get('/:storeNumber/:filename/chunk', async (req, res) => {
+  const { storeNumber, filename } = req.params;
+
+  if (!isValidStoreNumber(storeNumber)) {
+    return res.status(400).json({
+      error: 'Invalid store ID. Use letters, numbers, and optional hyphens only.',
+    });
+  }
+
+  if (!isValidFilename(filename)) {
+    return res.status(400).json({ error: 'Invalid filename.' });
+  }
+
+  const mode = parseChunkMode(req.query.mode);
+  const lineLimit = parseChunkLineLimit(req.query.lines);
+  const url = `${storeBaseUrl(storeNumber)}${encodeURIComponent(filename)}`;
+
+  try {
+    if (mode === 'tail') {
+      const rangeResult = await tryFetchTailChunkWithRange(url, lineLimit, 2 * 1024 * 1024);
+      if (rangeResult) {
+        return res.json({
+          storeNumber,
+          filename,
+          mode,
+          lineLimit,
+          truncated: rangeResult.truncated,
+          lines: rangeResult.lines,
+        });
+      }
+    }
+
+    const { lines, truncated } = await fetchLogChunk(url, mode, lineLimit);
+    return res.json({
+      storeNumber,
+      filename,
+      mode,
+      lineLimit,
+      truncated,
+      lines,
+    });
+  } catch (err) {
+    if (err.code === 'ECONNREFUSED' || err.code === 'ENOTFOUND' || err.code === 'ETIMEDOUT') {
+      return res.status(503).json({
+        error: `Could not connect to store ${storeNumber}. The system may be offline or unreachable.`,
+      });
+    }
+    if (err.response) {
+      return res.status(err.response.status).json({
+        error: `Store ${storeNumber} returned HTTP ${err.response.status} for file "${filename}".`,
+      });
+    }
+    console.error(`Error fetching chunk for ${filename} from store ${storeNumber}:`, err.message);
+    return res.status(500).json({ error: 'An unexpected error occurred while fetching the log chunk.' });
+  }
+});
+
+/**
  * GET /api/logs/:storeNumber/:filename
  * Streams the raw text content of a single log file back to the client.
  */
@@ -143,7 +379,7 @@ router.get('/:storeNumber/:filename', async (req, res) => {
   try {
     const response = await axios.get(url, {
       httpsAgent: insecureAgent,
-      timeout: 30000,
+      timeout: 120000,
       responseType: 'stream',
       headers: { 'User-Agent': 'XstoreLogViewer/1.0' },
     });

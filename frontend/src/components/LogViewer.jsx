@@ -1,7 +1,9 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { FixedSizeList as List } from 'react-window';
-import { fetchLogFile } from '../services/api';
+import { fetchLogFileChunk } from '../services/api';
 import ExportButton from './ExportButton';
+
+const REMOTE_LINE_CHUNK = 2000;
 
 // Matches common log level tokens in a line (case-insensitive)
 const LEVEL_PATTERN = /\b(ERROR|WARN(?:ING)?|INFO|DEBUG|TRACE)\b/i;
@@ -64,8 +66,14 @@ export default function LogViewer({ storeNumber, file, fileSource = 'remote', lo
   const [error, setError] = useState('');
   const [reversed, setReversed] = useState(true);
   const [listHeight, setListHeight] = useState(500);
+  const [remoteChunkMeta, setRemoteChunkMeta] = useState({
+    mode: 'tail',
+    lineLimit: REMOTE_LINE_CHUNK,
+    truncated: false,
+  });
 
   const containerRef = useRef(null);
+  const requestIdRef = useRef(0);
 
   // ── Memos (declared before effects that depend on them) ───────────────────
   const matchFn = useMemo(() => {
@@ -143,6 +151,11 @@ export default function LogViewer({ storeNumber, file, fileSource = 'remote', lo
       setLoading(false);
       setError('');
       setAllLines(localContent ? localContent.split('\n') : []);
+      setRemoteChunkMeta({
+        mode: 'tail',
+        lineLimit: REMOTE_LINE_CHUNK,
+        truncated: false,
+      });
       return;
     }
 
@@ -151,9 +164,22 @@ export default function LogViewer({ storeNumber, file, fileSource = 'remote', lo
     setLoading(true);
     setError('');
     setAllLines([]);
-    fetchLogFile(storeNumber, file.name)
-      .then((text) => setAllLines(text.split('\n')))
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
+    const mode = reversed ? 'tail' : 'head';
+
+    fetchLogFileChunk(storeNumber, file.name, { mode, lines: REMOTE_LINE_CHUNK })
+      .then((payload) => {
+        if (requestId !== requestIdRef.current) return;
+        setAllLines(Array.isArray(payload?.lines) ? payload.lines : []);
+        setRemoteChunkMeta({
+          mode: payload?.mode === 'head' ? 'head' : 'tail',
+          lineLimit: Number.isFinite(payload?.lineLimit) ? payload.lineLimit : REMOTE_LINE_CHUNK,
+          truncated: Boolean(payload?.truncated),
+        });
+      })
       .catch((err) => {
+        if (requestId !== requestIdRef.current) return;
         const msg =
           err.response?.data?.error ||
           err.response?.data ||
@@ -161,8 +187,11 @@ export default function LogViewer({ storeNumber, file, fileSource = 'remote', lo
           'Failed to load log file.';
         setError(String(msg));
       })
-      .finally(() => setLoading(false));
-  }, [storeNumber, file, fileSource, localContent]);
+      .finally(() => {
+        if (requestId !== requestIdRef.current) return;
+        setLoading(false);
+      });
+  }, [storeNumber, file, fileSource, localContent, reversed]);
 
   // ── Callbacks ─────────────────────────────────────────────────────────────
 
@@ -193,6 +222,13 @@ export default function LogViewer({ storeNumber, file, fileSource = 'remote', lo
   const isFiltered =
     filters.text || filters.levels.size > 0 || filters.dateFrom || filters.dateTo;
 
+  const remoteSubsetLabel = useMemo(() => {
+    if (fileSource !== 'remote') return '';
+    const orientation = remoteChunkMeta.mode === 'head' ? 'oldest' : 'newest';
+    if (!remoteChunkMeta.truncated) return `Loaded complete file (${orientation} scan)`;
+    return `Showing ${orientation} ${remoteChunkMeta.lineLimit.toLocaleString()} lines for fast loading`;
+  }, [fileSource, remoteChunkMeta.mode, remoteChunkMeta.truncated, remoteChunkMeta.lineLimit]);
+
   if (!file) {
     return (
       <div className="flex-1 flex items-center justify-center text-gray-500 text-sm">
@@ -208,11 +244,18 @@ export default function LogViewer({ storeNumber, file, fileSource = 'remote', lo
         <div className="flex items-center gap-3 min-w-0">
           <span className="font-mono text-xs text-gray-700 dark:text-gray-300 truncate">{file.name}</span>
           {!loading && (
-            <span className="text-xs text-gray-500">
-              {isFiltered
-                ? `${filteredLines.length.toLocaleString()} / ${allLines.length.toLocaleString()} lines`
-                : `${allLines.length.toLocaleString()} lines`}
-            </span>
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="text-xs text-gray-500">
+                {isFiltered
+                  ? `${filteredLines.length.toLocaleString()} / ${allLines.length.toLocaleString()} lines`
+                  : `${allLines.length.toLocaleString()} lines`}
+              </span>
+              {fileSource === 'remote' && (
+                <span className="text-[11px] text-gray-400 truncate" title={remoteSubsetLabel}>
+                  {remoteSubsetLabel}
+                </span>
+              )}
+            </div>
           )}
 
           {/* Reverse order toggle */}
@@ -243,7 +286,7 @@ export default function LogViewer({ storeNumber, file, fileSource = 'remote', lo
       <div ref={containerRef} className="flex-1 min-h-0 bg-white dark:bg-gray-950 relative">
         {loading && (
           <div className="flex items-center justify-center h-full text-gray-500 dark:text-gray-400 text-xs animate-pulse">
-            Loading {file.name}…
+            Loading {reversed ? 'newest' : 'oldest'} lines from {file.name}…
           </div>
         )}
         {error && !loading && (

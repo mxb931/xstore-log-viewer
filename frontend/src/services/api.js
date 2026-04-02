@@ -4,7 +4,7 @@ const api = axios.create({
   // In dev, Vite proxies /api to localhost:3001.
   // In production, same origin serves both frontend and backend.
   baseURL: '/api',
-  timeout: 30000,
+  timeout: 120000,
 });
 
 /**
@@ -28,6 +28,28 @@ export async function fetchLogFile(storeNumber, filename) {
     `/logs/${encodeURIComponent(storeNumber)}/${encodeURIComponent(filename)}`,
     { responseType: 'text' }
   );
+  return data;
+}
+
+/**
+ * Fetch a partial line chunk from a log file.
+ * mode=head is optimized for oldest-first, mode=tail for newest-first.
+ * @param {string} storeNumber
+ * @param {string} filename
+ * @param {{ mode?: 'head' | 'tail', lines?: number }} options
+ * @returns {Promise<{ storeNumber: string, filename: string, mode: 'head' | 'tail', lineLimit: number, truncated: boolean, lines: string[] }>}
+ */
+export async function fetchLogFileChunk(storeNumber, filename, options = {}) {
+  const mode = options.mode === 'head' ? 'head' : 'tail';
+  const lines = Number.isFinite(options.lines) ? Math.trunc(options.lines) : 2000;
+
+  const { data } = await api.get(
+    `/logs/${encodeURIComponent(storeNumber)}/${encodeURIComponent(filename)}/chunk`,
+    {
+      params: { mode, lines },
+    }
+  );
+
   return data;
 }
 
